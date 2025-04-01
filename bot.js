@@ -119,7 +119,7 @@ async function safeDeleteMessage(chatId, messageId) {
 
 async function safeSendPhoto(chatId, filePath, options = {}) {
   try {
-    const msg = await bot.sendPhoto(chatId, filePath, options);
+    const msg = await bot.sendPhoto(chatId, fs.createReadStream(filePath), options);
     return msg;
   } catch (err) {
     handleSendError(chatId, err);
