@@ -1,13 +1,56 @@
 require("dotenv").config(); // Подключаем dotenv
 const TelegramBot = require("node-telegram-bot-api");
+const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
 
-// ========== 1. Настройки бота и чтение отзывов ==========
-const token = process.env.BOT_TOKEN;
+// Подключаемся к MongoDB
+// Возьмём нужные переменные окружения
+const { 
+  BOT_TOKEN,
+  MONGODB_HOST, 
+  MONGODB_PORT, 
+  MONGODB_USERNAME, 
+  MONGODB_PASSWORD, 
+  MONGODB_DBNAME 
+} = process.env;
+
+const passwordEncoded = encodeURIComponent(MONGODB_PASSWORD);
+
+// Добавляем &directConnection=true
+const mongoUri = `mongodb://${MONGODB_USERNAME}:${passwordEncoded}` +
+  `@${MONGODB_HOST}:${MONGODB_PORT}/${MONGODB_DBNAME}?authSource=admin&directConnection=true`;
+
+console.log("BOT_TOKEN:", process.env.BOT_TOKEN);
+console.log("MONGODB_HOST:", process.env.MONGODB_HOST);
+console.log("MONGODB_USERNAME:", process.env.MONGODB_USERNAME);
+console.log("MONGODB_PASSWORD:", process.env.MONGODB_PASSWORD);
+console.log("MONGODB_DBNAME:", process.env.MONGODB_DBNAME);
+
+// Добавляем увеличенные таймауты:
+mongoose.connect(mongoUri, {
+  connectTimeoutMS: 30000,
+  socketTimeoutMS: 30000,
+})
+  .then(() => {
+    console.log("Успешное подключение к MongoDB");
+  })
+  .catch((err) => {
+    console.error("Ошибка подключения к MongoDB:", err);
+  });
+
+// Определяем схему и модель User
+const userSchema = new mongoose.Schema({
+  telegramId: { type: Number, unique: true, required: true }, // ID телеграм пользователя
+  username: { type: String, required: true },                // Ник (или имя) в Телеграм
+  click_id: { type: String, default: "none" },               // Сюда сохраняем параметр после /start
+  complete: { type: [String], default: [] },                 // Можно использовать для отметки шагов
+});
+
+const User = mongoose.model("User", userSchema);
 
 // Создаём экземпляр бота
-const bot = new TelegramBot(token, {
+const bot = new TelegramBot(BOT_TOKEN, {
   polling: {
     interval: 100,
     autoStart: true,
@@ -17,7 +60,7 @@ const bot = new TelegramBot(token, {
   },
 });
 
-// Считываем файл reviews.txt (синхронно, т.к. он обычно небольшой)
+// ---------- Читаем файл с отзывами и формируем массив отзывов ----------
 let reviewsLines = [];
 try {
   const reviewsData = fs.readFileSync(
@@ -34,10 +77,7 @@ try {
   // Заменяем "\n" внутри строки на настоящие переводы (для многострочных отзывов)
   reviewsLines = reviewsLines.map((line) => line.replace(/\\n/g, "\n"));
 } catch (err) {
-  console.warn(
-    "Не удалось прочитать файл reviews.txt. Продолжаем без отзывов.",
-    err
-  );
+  console.warn("Не удалось прочитать файл reviews.txt. Продолжаем без отзывов.", err);
 }
 
 // Допустимые расширения (фото и видео)
@@ -84,8 +124,6 @@ for (let i = 0; i < reviewsLines.length; i++) {
 }
 
 // ========== 2. Логика вопросов, таймера, финального сообщения ==========
-
-// Состояния для опроса
 const STATES = {
   NONE: "none",
   Q1: "question1",
@@ -93,19 +131,17 @@ const STATES = {
   Q3: "question3",
 };
 
-// userStates: хранит данные по каждому пользователю в памяти
-// Ключ — chatId, значение — объект со свойствами: {state, reviewIndex, refParam, ...}
+// Для состояния сессии используем объект в памяти (можно перенести в БД при желании)
 const userStates = {};
 
 // --------- Безопасные функции отправки/удаления ---------
-
 async function safeSendMessage(chatId, text, options = {}) {
   try {
     const msg = await bot.sendMessage(chatId, text, options);
     return msg;
   } catch (err) {
     handleSendError(chatId, err);
-    return null; // Возвращаем null, если отправка не удалась
+    return null;
   }
 }
 
@@ -113,7 +149,7 @@ async function safeDeleteMessage(chatId, messageId) {
   try {
     await bot.deleteMessage(chatId, messageId);
   } catch (err) {
-    // Игнорируем ошибки при удалении (часто сообщение уже удалено или истекло время)
+    // Игнорируем любые ошибки при удалении
   }
 }
 
@@ -139,14 +175,8 @@ async function safeSendVideo(chatId, filePath, options = {}) {
 
 // Функция обработки ошибок отправки
 function handleSendError(chatId, err) {
-  if (
-    err.response &&
-    err.response.body &&
-    err.response.body.error_code === 403
-  ) {
-    console.log(
-      `Пользователь с chatId=${chatId} заблокировал бота или недоступен.`
-    );
+  if (err.response && err.response.body && err.response.body.error_code === 403) {
+    console.log(`Пользователь с chatId=${chatId} заблокировал бота или недоступен.`);
   } else {
     console.error("Ошибка при отправке сообщения:", err);
   }
@@ -162,7 +192,6 @@ bot.on("message", async (msg) => {
   // 1) Отлавливаем /start (с параметром или без)
   // Например: /start 451325435
   if (text.startsWith("/start")) {
-    // Разбираем возможный параметр
     const parts = text.split(" ");
     let startParam = null;
     if (parts.length > 1) {
@@ -170,18 +199,41 @@ bot.on("message", async (msg) => {
       startParam = parts[1];
     }
 
-    // Инициализируем состояние пользователя, если нет
+    // 2) Создаём/обновляем пользователя в БД
+    // Берём username из msg.from.username, если нет — подставим что-то
+    const candidateUsername = msg.from.username
+      ? msg.from.username
+      : (msg.from.first_name || "user") + (msg.from.last_name || "");
+
+    // Ищем и обновляем (либо создаём) юзера
+    let userDoc = await User.findOne({ telegramId: chatId });
+    if (!userDoc) {
+      // Если нет в базе — создаём
+      userDoc = new User({
+        telegramId: chatId,
+        username: candidateUsername,
+        click_id: startParam || "none",
+      });
+      await userDoc.save();
+    } else {
+      // Если уже есть — обновляем click_id
+      userDoc.click_id = startParam || "none";
+      // При желании можно обновить username
+      userDoc.username = candidateUsername;
+      await userDoc.save();
+    }
+
+    // 3) Инициализируем/сбрасываем состояние в памяти
     if (!userStates[chatId]) {
       userStates[chatId] = { state: STATES.NONE, reviewIndex: 0 };
     }
-    // Сохраняем параметр в userStates
-    userStates[chatId].refParam = startParam || null;
+    userStates[chatId].refParam = userDoc.click_id; // Сохраним то, что в базе
+    userStates[chatId].state = STATES.NONE;
+    userStates[chatId].reviewIndex = 0;
 
-    // Дальше обычная логика /start
+    // 4) Отправляем приветствие
     const userName = msg.from.first_name || msg.from.username || "Друзья";
-
     const finalImagePath = path.join(__dirname, "photo", "1.webp");
-
 
     await safeSendPhoto(chatId, finalImagePath, {
       caption:
@@ -196,6 +248,7 @@ bot.on("message", async (msg) => {
         ],
       },
     });
+
     return;
   }
 
@@ -207,13 +260,13 @@ bot.on("message", async (msg) => {
 
   // 3) Кнопка «Как получить»
   if (text === "Как получить") {
-    const userRef = userStates[chatId]?.refParam
-      ? userStates[chatId].refParam
-      : "organic";
-    const finalLink = `https://onesecgo.ru/stream/8kact?cid=${userRef}`;
+    // Достаём пользователя, чтобы взять актуальный click_id
+    const userDoc = await User.findOne({ telegramId: chatId });
+    const finalLink = `https://onesecgo.ru/stream/8kact?cid=${
+      userDoc?.click_id || "none"
+    }`;
 
     const finalImagePath = path.join(__dirname, "photo", "2.webp");
-
     await safeSendPhoto(chatId, finalImagePath, {
       caption:
         "📝 Что нужно сделать:\n\n" +
@@ -234,7 +287,7 @@ bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const data = query.data;
 
-  // --- Нажали «Получить деньги» ---
+  // --- Нажали «Подобрать стратегию» ---
   if (data === "get_money") {
     // Удаляем приветственное сообщение
     await safeDeleteMessage(chatId, query.message.message_id);
@@ -263,7 +316,6 @@ bot.on("callback_query", async (query) => {
       userStates[chatId].lastQuestionMsgId = qMsg.message_id;
     }
 
-    // Подтверждаем нажатие
     await bot.answerCallbackQuery(query.id).catch(() => {});
     return;
   }
@@ -364,7 +416,7 @@ bot.on("callback_query", async (query) => {
   }
 });
 
-// ========== Функция «таймер» (имитация расчётов/ожидания) ==========
+// ========== «Таймер» (имитация вычислений) ==========
 function startTimerSequence(chatId) {
   const messages = [
     "Анализируем ваш профиль…",
@@ -380,42 +432,41 @@ function startTimerSequence(chatId) {
   let lastMessageId = null;
 
   function showNextMessage() {
-    // Удаляем предыдущее сообщение (если было)
+    // Удаляем предыдущее "промежуточное" сообщение
     if (lastMessageId) {
       safeDeleteMessage(chatId, lastMessageId);
     }
 
-    // Если все этапы таймера пройдены
     if (index >= messages.length) {
-      // 1) Финальное сообщение
-      const userRef = userStates[chatId]?.refParam || "organic";
-      const finalLink = `https://onesecgo.ru/stream/8kact?cid=${userRef}`;
-
-      // Отправляем финальные сообщения
-      sendFinalMessages(chatId, finalLink).catch((err) =>
+      // Все этапы таймера пройдены
+      // Отправляем финальное сообщение
+      sendFinalMessages(chatId).catch((err) =>
         console.error("Ошибка в sendFinalMessages:", err)
       );
-
-      return; // Прекращаем цепочку
+      return;
     }
 
-    // Иначе отправляем очередное сообщение
     safeSendMessage(chatId, messages[index]).then((sentMsg) => {
       if (sentMsg) {
         lastMessageId = sentMsg.message_id;
       }
       index++;
-      // Вызываем следующее сообщение через 1 секунду
       setTimeout(showNextMessage, 2000);
     });
   }
 
-  // Запускаем цепочку
   showNextMessage();
 }
 
 // Отдельная функция отправки финальных сообщений
-async function sendFinalMessages(chatId, finalLink) {
+async function sendFinalMessages(chatId) {
+  // Достаём пользователя из базы, чтобы взять актуальный click_id
+  const userDoc = await User.findOne({ telegramId: chatId });
+
+  const finalLink = `https://onesecgo.ru/stream/8kact?cid=${
+    userDoc?.click_id || "none"
+  }`;
+
   await safeSendMessage(
     chatId,
     "🎉 Отлично! Мы подобрали для вас подходящую стратегию.\n\n" +
@@ -430,7 +481,6 @@ async function sendFinalMessages(chatId, finalLink) {
   );
 
   const finalImagePath = path.join(__dirname, "photo", "2.webp");
-
   await safeSendPhoto(chatId, finalImagePath, {
     caption:
       "📝 Что нужно сделать:\n\n" +
@@ -442,46 +492,38 @@ async function sendFinalMessages(chatId, finalLink) {
       inline_keyboard: [[{ text: "Перейти", url: finalLink }]],
     },
   });
-  return;
 }
 
-// ========== Функция отправки Отзывов (по кругу) ==========
+// ========== Функция отправки следующих отзывов (циклично) ==========
 async function sendNextReview(chatId) {
-  // Если вдруг нет отзывов
   if (!reviewsArray.length) {
     await safeSendMessage(chatId, "Пока нет отзывов");
     return;
   }
 
-  // Инициализируем userStates[chatId], если нет
+  // Инициализируем
   if (!userStates[chatId]) {
     userStates[chatId] = { state: STATES.NONE, reviewIndex: 0 };
   }
 
-  // Убедимся, что есть поле reviewIndex
   if (typeof userStates[chatId].reviewIndex !== "number") {
     userStates[chatId].reviewIndex = 0;
   }
 
-  // Берём отзыв по индексу
-  const { text, filePath, type } = reviewsArray[userStates[chatId].reviewIndex];
+  const { text, filePath, type } =
+    reviewsArray[userStates[chatId].reviewIndex];
 
-  // Отправляем фото или видео
   if (type === "photo") {
     await safeSendPhoto(chatId, filePath, { caption: text });
   } else {
-    // type === "video"
+    // video
     await safeSendVideo(chatId, filePath, { caption: text });
   }
 
-  // Увеличиваем индекс
   userStates[chatId].reviewIndex += 1;
-
-  // Если дошли до конца массива — начинаем с начала
   if (userStates[chatId].reviewIndex >= reviewsArray.length) {
     userStates[chatId].reviewIndex = 0;
   }
 }
 
-// Запускаем бота
 console.log("Бот запущен...");

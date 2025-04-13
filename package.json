@@ -2,21 +2,22 @@
   "name": "new-bot",
   "version": "1.0.0",
   "main": "bot.js",
- "scripts": {
-  "start": "node bot.js",
-  "pm2-start": "pm2 start bot.js --name telegram-bot",
-  "stop": "pm2 stop telegram-bot",
-  "restart": "pm2 restart telegram-bot",
-  "delete": "pm2 delete telegram-bot",
-  "logs": "pm2 logs telegram-bot",
-  "test": "echo \"Error: no test specified\" && exit 1"
-},
+  "scripts": {
+    "start": "node bot.js",
+    "pm2-start": "pm2 start bot.js --name telegram-bot",
+    "stop": "pm2 stop telegram-bot",
+    "restart": "pm2 restart telegram-bot",
+    "delete": "pm2 delete telegram-bot",
+    "logs": "pm2 logs telegram-bot",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
     "dotenv": "^16.4.7",
+    "mongoose": "^8.13.2",
     "node-telegram-bot-api": "^0.66.0"
   }
 }
