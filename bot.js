@@ -274,11 +274,7 @@ bot.on("message", async (msg) => {
       userDoc.click_id = baseCid;
       userDoc.link = generatedLink;
     }
-    await userDoc.save();gi
-
-    // Формируем ссылку по условиям
-    
-    
+    await userDoc.save();
 
     // Инициализируем память
     userStates[chatId] = { state: STATES.NONE, reviewIndex: 0 };
