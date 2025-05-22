@@ -204,13 +204,15 @@ bot.on("message", async (msg) => {
       { telegramId: 1, username: 1, status: 1, link: 1 }
     ).lean();
 
+    let delivered = 0; // ← счётчик
+
     for (const u of users) {
       const caption =
         u.status === "mes"
           ? "🔥 Остался один шаг!\nЗарегистрируйтесь сейчас и получите доступ к пошаговой инструкции по заработку."
           : "🚀 Активируйте подписку всего за 1 ₽ и начните получать прибыль уже сегодня!";
 
-      await safeSendPhoto(
+      const res = await safeSendPhoto(
         u.telegramId,
         path.join(__dirname, "photo", "2.webp"),
         {
@@ -219,13 +221,16 @@ bot.on("message", async (msg) => {
             inline_keyboard: [[{ text: "Перейти", url: u.link }]],
           },
         }
-      ).catch(() => {}); // игнорируем возможные 403/400
+      ).catch(() => null); 
 
-      // лёгкая пауза, чтобы не упереться в лимит 30 msg/сек
+      if (res) delivered++; 
       await new Promise((r) => setTimeout(r, 35));
     }
 
-    await safeSendMessage(ADMIN_ID, "✅ Рассылка завершена");
+    await safeSendMessage(
+      ADMIN_ID,
+      `✅ Рассылка завершена\nОтправлено: ${delivered}/${users.length}`
+    );
     return;
   }
 
@@ -238,16 +243,7 @@ bot.on("message", async (msg) => {
     // 👉 Берём CID ДО символа «_»
     const baseCid = rawParam ? rawParam.split("_")[0] : "none";
 
-    // Формируем ссылку по условиям
-    const sub1 = `&sub1=${userDoc.telegramId}`;
-    let generatedLink;
-    if (rawParam?.endsWith("_al2")) {
-      generatedLink = `https://justonesec.ru/stream/cprumod249ak?cid=${baseCid}${sub1}`;
-    } else if (rawParam?.endsWith("_al")) {
-      generatedLink = `https://onesecgo.ru/stream/gamesportg?cid=${baseCid}${sub1}`;
-    } else {
-      generatedLink = `https://onesecgo.ru/stream/8kact?cid=${baseCid}${sub1}`;
-    }
+    
 
     // username fallback
     const username =
@@ -256,6 +252,16 @@ bot.on("message", async (msg) => {
 
     // Создаём/обновляем пользователя
     let userDoc = await User.findOne({ telegramId: chatId });
+    const sub1 = `&sub1=${userDoc.telegramId}`;
+
+    let generatedLink;
+    if (rawParam?.endsWith("_al2")) {
+      generatedLink = `https://justonesec.ru/stream/cprumod249ak?cid=${baseCid}${sub1}`;
+    } else if (rawParam?.endsWith("_al")) {
+      generatedLink = `https://onesecgo.ru/stream/gamesportg?cid=${baseCid}${sub1}`;
+    } else {
+      generatedLink = `https://onesecgo.ru/stream/8kact?cid=${baseCid}${sub1}`;
+    }
     if (!userDoc) {
       userDoc = new User({
         telegramId: chatId,
@@ -268,7 +274,11 @@ bot.on("message", async (msg) => {
       userDoc.click_id = baseCid;
       userDoc.link = generatedLink;
     }
-    await userDoc.save();
+    await userDoc.save();gi
+
+    // Формируем ссылку по условиям
+    
+    
 
     // Инициализируем память
     userStates[chatId] = { state: STATES.NONE, reviewIndex: 0 };
