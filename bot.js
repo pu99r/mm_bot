@@ -242,9 +242,7 @@ bot.on("message", async (msg) => {
 
     // 👉 Берём CID ДО символа «_»
     const baseCid = rawParam ? rawParam.split("_")[0] : "none";
-
     
-
     // username fallback
     const username =
       msg.from.username ||
@@ -252,7 +250,7 @@ bot.on("message", async (msg) => {
 
     // Создаём/обновляем пользователя
     let userDoc = await User.findOne({ telegramId: chatId });
-    const sub1 = `&sub1=${userDoc.telegramId}`;
+    const sub1 = `&sub1=${chatId}`;
 
     let generatedLink;
     if (rawParam?.endsWith("_al2")) {
